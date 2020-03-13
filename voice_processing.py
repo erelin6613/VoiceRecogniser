@@ -5,7 +5,7 @@ from scipy.io import wavfile
 import os
 from nltk import tokenize
 import librosa
-#import librosa.display
+from pydub import AudioSegment
 import matplotlib.pyplot as plt
 import numpy as np
 from transformers import BertTokenizer
@@ -13,26 +13,83 @@ from torch.utils.data import Dataset, DataLoader
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim import Adam
 from torchaudio import load
 from torchaudio.transforms import MFCC
+#from transformers import BertTokenizer, BertModel
 
-data_dir = '/home/val/VoiceDataset'
+data_dir = '../VoiceDataset'
+audio_dir = 'clips'
 
 sound_len = 0
 
+
+class VoiceInstance:
+
+	def __init__(self, file, text, sound_len=10**10):
+
+		self.file = file
+		# self.rate = rate
+		self.text = text
+		self.mfcc = _transform_audio(self.file)
+		self.emb = _get_embeddings(self.text)
+
+	def _transform_audio(self):
+
+		waveform, rate = load(os.path.join(self.file))
+		self.audio = self._get_mfcc(waveform, rate)
+
+	def _get_mfcc(self, arr, sample_rate=22000):
+
+		mfcc_tensor = MFCC(sample_rate)
+		return mfcc_tensor.forward(arr)
+
+	def _get_embeddings(self):
+
+		def remove_punkts(self):
+
+			punkts = ['.', '?', '!', '\'', '"', '’', '‘', ',', ';']
+			for punkt in punkts:
+				self.text = str(self.text).replace(punkt, '')
+
+
+		def tokenize_text(self, text):
+
+			tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+			return tokenizer.tokenize(text)
+
+		def get_inputs(self, tokens):
+			return tokenizer.convert_tokens_to_ids(tokens)
+
+		def get_bert(self):
+			return BertModel.from_pretrained('bert-base-uncased')
+
+		remove_punkts()
+		self.emb = self.tokenize_text(self.text)
+
+
 class VoiceDataset(Dataset):
 
-	def __init__(self, frame, sound_len):
+	def __init__(self, info_frame):
 
-		self.frame = frame
-		self.sound_len = sound_len
+		self.info_frame = info_frame
+		self.load_data()
 
 	def __len__(self):
-		return self.frame.shape[0]
+		return len(self.audio)
 
 	def __getitem__(self, item):
-		if torch.is_tensor(item):
-			return item
+		return item
+
+	def load_data(self):
+
+		self.instances = []
+
+		for i in self.info_frame.index:
+			audio = VoiceInstance(file=os.path.join(self.audio_dir, self.info_frame.loc[i, 'path']),
+									text=self.info_frame.loc[i, 'sentence'])
+			self.instances.append(audio)
+
 
 
 class VoiceModel(nn.Module):
@@ -40,52 +97,48 @@ class VoiceModel(nn.Module):
 	def __init__(self):
 
 		super().__init__()
-		self.input = nn.GRU(input_size=sound_len, bidirectional=True)
-		self.gru = nn.GRU(bidirectional=False)
+		self.input = nn.GRU(input_size=sound_len, bidirectional=True, hidden_size=512)
+		self.gru = nn.GRU(input_size=512, bidirectional=False, hidden_size=512)
 		self.dense = nn.Linear(512, 256)
 		self.dropout = nn.Dropout(0.3)
 		self.output = nn.Linear(256, 128)
 
-	def forward(x):
-		pass
+
+	def forward(audio):
+		audio = F.relu(self.input(audio))
+		audio = F.relu(self.gru(audio))
+		audio = F.relu(self.dense(audio))
+		audio = F.relu(self.dropout(audio))
+		audio = self.output(audio)
+
+		return x
+
+def main():
+
+	batch_size = 16
+	epochs = 1
+	model = VoiceModel()
+	criterion = nn.NLLLoss()
+	optimizer = Adam(model.parameters(), lr=0.001)
+
+	audio_data = pd.read_csv(os.path.join(data_dir, 'train.tsv'), sep='\t')	# .loc[25:75, :]
+	print(audio_data.columns)
 
 
-def get_mfcc(arr):
+	dataset = VoiceDataset(info_frame=audio_data)
+	dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-	mfcc_tensor = MFCC(sample_rate=22000)
-	return mfcc_tensor.forward(arr)
+	for epoch in range(epochs):
+		running_loss = 0
+		for batch in dataset:
 
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+			optimizer.zero_grad()
+			output = model(batch)
+			loss = criterion(batch[0], batch[1])
+			loss.backwards()
+			optimizer.step()
+			running_loss += loss.item()
+			print(running_loss)
 
-audio_dir = 'clips'
-
-audio_data = pd.read_csv('train.tsv', sep='\t')	# .loc[25:75, :]
-print(audio_data.columns)
-sentences = audio_data.loc[:, 'sentence']
-print(sentences.tolist()[1])
-
-batch_size = 16
-
-lens = []
-for i in audio_data.index:
-	file = os.path.join(data_dir, audio_dir, audio_data.loc[i, 'path'])
-	waveform, sample_rate = load(file)
-	#print(waveform, sample_rate)
-	
-	speech = AudioSegment.from_mp3(file)
-	#print(speech.channels, 'channels')
-	#lens.append(len(speech))
-	#speech_array = np.array(speech.get_array_of_samples())
-	audio_data.loc[i, 'len'] = len(waveform[0])
-	#audio_data.loc[i, 'max_amplitude'] = max(waveform[0].tolist())
-	#audio_data.loc[i, 'min_amplitude'] = abs(min(waveform[0].tolist()))
-	#audio_data.loc[i, 'mfcc'] = get_mfcc(waveform[0])
-	#print(get_mfcc(waveform[0]).shape)
-	#print(max(waveform[0].tolist()))
-	#print(len(speech_array))
-	#plt.plot(range(len(speech_array)), speech_array)
-	#plt.show()
-	#break
-
-print(audio_data.describe())
-
+if __name__ == '__main__':
+	main()

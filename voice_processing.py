@@ -163,20 +163,23 @@ class VoiceModel(nn.Module):
         self.input = nn.GRU(input_size=window, bidirectional=True, hidden_size=512)
         self.gru = nn.GRU(input_size=512*2, bidirectional=False, hidden_size=512)
         self.flatten = nn.Flatten()
+        #self.pool = nn.MaxPool1d(10, 5)
         self.dense = nn.Linear(512, 256)
         self.dropout = nn.Dropout(0.3)
         self.output = nn.Linear(256, max_len_text)
     
     def forward(self, audio):
         audio = Tensor(audio).reshape(1, audio.shape[2], window)
-        audio, hidden_gru = tanh(self.input(audio)[0])
-        audio, hidden_out = self.gru(audio.view(-1, audio.shape[0], audio.shape[1]))
+        audio, hidden_gru = self.input(audio)
         audio = tanh(audio)
+        audio, hidden_out = self.gru(audio) #(audio.view(-1, audio.shape[0], audio.shape[1]))
+        audio = tanh(audio)
+        #audio = self.pool(audio)
         print(audio.shape)
-        audio = self.flatten(audio)
+        #audio = self.flatten(audio).view(512, -1)
+        #print(audio.shape)
         audio = F.relu(self.dense(audio))
         audio = F.relu(self.dropout(audio))
-        audio = mean(audio, 256)
         audio = self.output(audio)
         
         return audio

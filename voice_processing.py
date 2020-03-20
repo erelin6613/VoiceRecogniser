@@ -43,11 +43,13 @@ I would be grateful for any suggestion or help.
 import pandas as pd
 from scipy.io import wavfile
 import os
+import sys
 import librosa
 import matplotlib.pyplot as plt
 import numpy as np
+#from sklearn.metrics.pairwise import cosine_similarity
 from keras_preprocessing.sequence import pad_sequences
-from transformers import BertModel, BertConfig, BertTokenizer
+from transformers import DistilBertTokenizer, DistilBertModel
 from torch.utils.data import Dataset, DataLoader
 from torch import Tensor, tanh, flatten, squeeze, mean, stft
 import torch.nn as nn
@@ -59,22 +61,24 @@ from torchaudio.transforms import MFCC, Resample
 from torchaudio.functional import istft
 import numpy as np
 
-data_dir = '../common-voice'
+sys.path.insert(0, "../input/transformers/transformers-master/")
+
+data_dir = '../input/common-voice'
 audio_dir = 'cv-valid-train'
 sound_len = 10
-bert_path = '../bert-base-uncased'
-bert_vocab_path = 'vocab.txt'
-bert_model_path = 'bert-base-uncased/pytorch_model.bin'
+bert_path = '../input/distilbertbaseuncased/'
+bert_model_path = 'bert-base-uncased'
 max_len_text = 30
 window = 40
 
 class VoiceInstance:
     
-    def __init__(self, file, tokenizer, sound_len=10**10, text=None):
+    def __init__(self, file, tokenizer, lang_model, sound_len=10**10, text=None):
         
         self.file = file
         self.text = text
         self.tokenizer = tokenizer
+        self.lang_model = lang_model
         self._transform_audio()
         self.emb = self._get_embeddings()
         
@@ -107,26 +111,24 @@ class VoiceInstance:
                 text = str(self.text).replace(punkt, '')
             return text
         
-        def tokenize_text(text):
-            return self.tokenizer.tokenize(text)
+        def get_inputs():
+            input_ids = Tensor(self.tokenizer.encode(self.text, add_special_tokens=True)).unsqueeze(0)
+            return self.lang_model(input_ids.long())
         
-        def get_inputs(tokens):
-            return self.tokenizer.convert_tokens_to_ids(tokens)
         
         if self.text:
             self.text = remove_punkts(self.text)
-            self.tokens = tokenize_text(self.text)
-            emb = get_inputs(self.tokens)
+            emb = get_inputs()
             return emb
-
 
 class VoiceDataset(Dataset):
     
-    def __init__(self, info_frame, audio_dir, tokenizer):
+    def __init__(self, info_frame, audio_dir, tokenizer, lang_model):
         
         self.info_frame = info_frame
         self.audio_dir = audio_dir
         self.tokenizer = tokenizer
+        self.lang_model = lang_model
         self.load_data()
     
     def __len__(self):
@@ -141,7 +143,9 @@ class VoiceDataset(Dataset):
         for i in self.info_frame.index:
             if self.info_frame.loc[i, 'text'] is not None:
                 audio = VoiceInstance(file=os.path.join(self.audio_dir, self.info_frame.loc[i, 'filename']),
-                                      text=self.info_frame.loc[i, 'text'], tokenizer=self.tokenizer)
+                                      text=self.info_frame.loc[i, 'text'], 
+                                      tokenizer=self.tokenizer,
+                                      lang_model=self.lang_model)
                 self.instances.append(audio)
         embs = []
         mfccs = []
@@ -158,42 +162,49 @@ class VoiceModel(nn.Module):
     def __init__(self):
         
         super().__init__()
-        self.lstm_enc = nn.LSTM(input_size=window, hidden_size=512, batch_first=True)
+        self.lstm_enc = nn.LSTM(input_size=max_len_text, hidden_size=512, batch_first=True)
         self.lstm_dec = nn.LSTM(input_size=512, hidden_size=256)
         self.input = nn.GRU(input_size=window, bidirectional=True, hidden_size=512)
         self.gru = nn.GRU(input_size=512*2, bidirectional=False, hidden_size=512)
         self.flatten = nn.Flatten()
-        self.dense = nn.Linear(256, 128)
+        self.dense = nn.Linear(256, max_len_text*3)
         self.dropout = nn.Dropout(0.3)
         self.linear_2 = nn.Linear(128, max_len_text)
-        self.output = nn.Linear(max_len_text*100, 1)
+        self.output = nn.Linear(max_len_text*100, max_len_text)
     
     def forward(self, audio):
         audio = Tensor(audio)
-        audio, hidden_enc = self.lstm_enc(audio.reshape(1, -1, window))
+        audio = nn.functional.pad(audio, (max_len_text - audio.shape[-1], 0), mode='constant', value=0)
+        audio, hidden_enc = self.lstm_enc(audio)
         audio = tanh(audio)
         audio, hidden_dec = self.lstm_dec(audio)
         audio = tanh(audio)
         audio = F.relu(self.dense(audio))
-        audio = self.flatten(audio)
-        # that's to see if it works, later I will figure an appropriate value
-        max_sound_len = 3000
-        audio = nn.functional.pad(audio, (max_sound_len-audio.shape[-1], 0), mode='constant', value=0)
-        audio = self.output(audio)
-        print(audio.shape)
+        audio = self.dropout(audio)
+        audio = self.flatten(audio).T
+        audio = mean(audio.view(max_len_text, -1), 1)
         
         return audio
 
 def main():
     
-    batch_size = 16
-    epochs = 10
-    model = VoiceModel()
-    criterion = nn.CosineSimilarity(dim=0)
-    optimizer = Adam(model.parameters(), lr=0.001)
-    info_frame = pd.read_csv(os.path.join(data_dir, 'cv-valid-train.csv'))[:50]	# .loc[25:75, :]
+    #info_frame = pd.read_csv('../input/common-voice/cv-valid-train.csv')
     
-    tokenizer = BertTokenizer.from_pretrained(os.path.join(bert_path, bert_vocab_path), return_tensors='pt')
+    batch_size = 16
+    epochs = 1
+    model = VoiceModel()
+    criterion = nn.MSELoss()
+    #criterion.requres_grad = True
+    optimizer = Adam(model.parameters(), lr=0.001)
+    info_frame = pd.read_csv(os.path.join(data_dir, 'cv-valid-train.csv')) [:100]	# .loc[25:75, :]
+    print(len(info_frame))
+    
+    tokenizer = DistilBertTokenizer.from_pretrained(bert_path)
+    vocab_size = len(tokenizer)
+    print(tokenizer)
+    #model = BertModel.from_pretrained('bert-base-uncased')
+    print(os.path.join(bert_path, bert_model_path))
+    lang_model = DistilBertModel.from_pretrained(bert_path)
     
     real_texts = []
     lengths = []
@@ -202,32 +213,53 @@ def main():
         real_texts.append(tokenizer.convert_tokens_to_ids(tokens))
         lengths.append(len(real_texts[i]))
         
-    print(info_frame.columns)
-    dataset = VoiceDataset(info_frame=info_frame, audio_dir=audio_dir, tokenizer=tokenizer)
+    #print(info_frame.columns)
+    #print(lengths)
+    
+    
+    dataset = VoiceDataset(info_frame=info_frame, audio_dir=audio_dir, 
+                           tokenizer=tokenizer, lang_model=lang_model)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    #print(dataset.instances[0].fft)
     
     for epoch in range(epochs):
         running_loss = 0
         i=0
         for batch in dataset.instances:
-            
+            scaled_emb = scale_embeddings(batch.emb, vocab_size)
             optimizer.zero_grad()
+            #print(batch.fft) # torch.Size([1, 40, 10])
+            #print(batch.stft.shape)
             output = model(batch.mfcc)
+            #print(output, batch.emb)
+            #loss = criterion(batch.emb, real_texts[i])
+            #print(batch.emb) #, real_texts[i])
+            #print('models output shape:', output.shape, '\nlabels shape:', Tensor(batch.emb).shape)
+            loss = criterion(output, Tensor(batch.emb))
+            
+            loss.backward()
+            print(output, Tensor(batch.emb))
+            print('loss:', loss)
+            #optimizer.step()
+            #running_loss += loss.item()
+            #print(running_loss)
             i += 1
+        # print(loss.mean())
         
     model.eval()
     
-    test_frame = pd.read_csv(os.path.join(data_dir, 'cv-valid-train.csv'))[50:75]
+    test_frame = pd.read_csv(os.path.join(data_dir, 'cv-valid-train.csv')) [100:125]
+    print(len(test_frame))
     test_frame.reset_index()
     print(test_frame.index)
     
     for text, file in zip(test_frame['text'], test_frame['filename']):
-        tokens = tokenizer.tokenize(text)
-        real_emb = tokenizer.convert_tokens_to_ids(tokens)
-        print('real embedding:', real_emb)
+        print('real embedding:', text)
         test_instance = VoiceInstance(file='cv-valid-train/'+file, 
                                       tokenizer=tokenizer)
         pred = model(test_instance.mfcc)
+        #pred = [int(x*vocab_size) for x in pred]
+        #pred = tokenizer.decode(pred)
         print('predicted:', pred)
             
 if __name__ == '__main__':
